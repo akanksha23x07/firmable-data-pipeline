@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: firmable_postgres
+    environment:
+      POSTGRES_DB: firmable_db
+      POSTGRES_USER: firmable
+      POSTGRES_PASSWORD: firmable123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres_db_load:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firmable -d firmable_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Main Pipeline Application
+  pipeline:
+    build: .
+    container_name: firmable_pipeline
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=firmable_db
+      - POSTGRES_USER=firmable
+      - POSTGRES_PASSWORD=firmable123
+      - POSTGRES_PORT=5432
+      - ENTITY_MATCHING_THRESHOLD=0.9
+      - ENTITY_MATCHING_LIMIT_RECORDS=100
+    volumes:
+      - ./logs:/app/logs
+      - ./dump:/app/dump
+      - ./transformations:/app/transformations
+      - ./entity_matching:/app/entity_matching
+    command: python run_pipeline.py
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: '2.0'
+        reservations:
+          memory: 4G
+          cpus: '1.0'
+
+volumes:
+  postgres_data:
+

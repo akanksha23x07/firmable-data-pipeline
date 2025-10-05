@@ -1,0 +1,12 @@
+# Python dependencies for the pipeline - no version pins for faster resolution
+psycopg2
+pandas
+numpy
+requests
+fastparquet
+xmltodict
+python-dateutil
+duckdb
+sentence-transformers
+faiss-cpu
+python-dotenv
