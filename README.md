@@ -1,6 +1,6 @@
-# Firmable Data Pipeline - Docker Setup
+# Firmable Data Pipeline 
 
-This document provides instructions for running the Firmable data pipeline using Docker and Docker Compose.
+This document provides instructions for running the Firmable data pipeline using Docker and Docker Compose along with Entity Matching Explaination
 
 ## Overview
 
