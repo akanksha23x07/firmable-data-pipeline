@@ -12,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import xml.etree.ElementTree as ET
 import pandas as pd
 import fastparquet
+from datetime import datetime
 
 
 class ABRExtraction:
@@ -66,6 +67,13 @@ class ABRExtraction:
             ]
         )
         return logging.getLogger(self.__class__.__name__)
+    
+    def _get_daily_folder_path(self):
+        """Get the current date folder path for organizing data by day"""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        daily_folder = os.path.join(self.dump_dir, current_date)
+        os.makedirs(daily_folder, exist_ok=True)
+        return daily_folder
     
     def _pick_text(self, entity, paths):
         """Helper function to extract text from XML element using multiple paths"""
@@ -125,15 +133,23 @@ class ABRExtraction:
         return record
     
     def _write_parquet_batch(self, batch, xml_name, batch_num):
-        """Write batch to Parquet file"""
+        """Write batch to Parquet file with daywise organization and timestamp naming"""
         if not batch:
             self.logger.debug("Empty batch, skipping write")
             return
         
         try:
+            # Get daily folder path
+            daily_folder = self._get_daily_folder_path()
+            
             # Clean XML name for filename
             clean_name = xml_name.replace('.xml', '').replace('20251001_', '')
-            parquet_file = f"{self.dump_dir}/{clean_name}_batch_{batch_num:03d}.parquet"
+            
+            # Create timestamp for unique file naming
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+            
+            # Create parquet filename with timestamp
+            parquet_file = os.path.join(daily_folder, f"{clean_name}_{timestamp}.parquet")
             
             self.logger.debug(f"Writing batch {batch_num} with {len(batch)} records to {parquet_file}")
             
@@ -366,7 +382,9 @@ class ABRExtraction:
                 "zip_results": zip_results
             }
             
-            progress_file = f"{self.dump_dir}/progress.json"
+            # Save progress in the daily folder
+            daily_folder = self._get_daily_folder_path()
+            progress_file = os.path.join(daily_folder, "progress.json")
             with open(progress_file, 'w') as f:
                 json.dump(progress, f, indent=2)
             
@@ -388,7 +406,7 @@ if __name__ == '__main__':
     # Initialize ABR extraction
     extractor = ABRExtraction(
         dump_dir="dump/abr_dump",
-        records_per_xml=20000,
+        records_per_xml=30000,
         parquet_batch_size=10000
     )
     

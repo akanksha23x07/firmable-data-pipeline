@@ -45,28 +45,76 @@ class ABRTransformer:
         
         logger.info("ABRTransformer initialized")
     
+    def _get_parquet_files_from_daily_folders(self) -> List[str]:
+        """Get parquet files from current day folder only, or all files if no daily folders exist."""
+        parquet_files = []
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # Check if input_path contains daily folders (YYYY-MM-DD format)
+        if os.path.isdir(self.input_path):
+            # First, look for current day folder
+            current_day_folder = os.path.join(self.input_path, current_date)
+            if os.path.isdir(current_day_folder):
+                # Process only current day folder
+                logger.info(f"Processing parquet files from current day folder: {current_date}")
+                for file in os.listdir(current_day_folder):
+                    if file.endswith('.parquet'):
+                        parquet_files.append(os.path.join(current_day_folder, file))
+            else:
+                # If no current day folder, look for any daily folders
+                daily_folders = []
+                for item in os.listdir(self.input_path):
+                    item_path = os.path.join(self.input_path, item)
+                    if os.path.isdir(item_path) and re.match(r'\d{4}-\d{2}-\d{2}', item):
+                        daily_folders.append(item)
+                
+                if daily_folders:
+                    # Use the most recent daily folder
+                    latest_folder = sorted(daily_folders)[-1]
+                    latest_folder_path = os.path.join(self.input_path, latest_folder)
+                    logger.info(f"No current day folder found. Using latest available folder: {latest_folder}")
+                    for file in os.listdir(latest_folder_path):
+                        if file.endswith('.parquet'):
+                            parquet_files.append(os.path.join(latest_folder_path, file))
+                else:
+                    # No daily folders, look for direct parquet files (backward compatibility)
+                    logger.info("No daily folders found. Looking for direct parquet files.")
+                    for file in os.listdir(self.input_path):
+                        if file.endswith('.parquet'):
+                            parquet_files.append(os.path.join(self.input_path, file))
+        
+        return parquet_files
+    
+    def _get_daily_output_folder(self) -> str:
+        """Get the current date folder path for organizing output by day"""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        daily_folder = os.path.join(self.output_path, current_date)
+        os.makedirs(daily_folder, exist_ok=True)
+        return daily_folder
+    
     def load_data(self, test_mode: bool = False) -> pd.DataFrame:
-        """Load all ABR parquet files."""
+        """Load all ABR parquet files from daily folders or root directory."""
         logger.info("Loading ABR data...")
         
-        # Get all parquet files in ABR dump
-        abr_files = [f for f in os.listdir(self.input_path) if f.endswith('.parquet')]
-        logger.info(f"Found {len(abr_files)} ABR parquet files")
+        # Get all parquet files from daily folders or root directory
+        parquet_files = self._get_parquet_files_from_daily_folders()
+        logger.info(f"Found {len(parquet_files)} ABR parquet files")
         
-        if not abr_files:
+        if not parquet_files:
             raise ValueError("No ABR parquet files found")
         
         if test_mode:
             # For testing, load only the first parquet file
-            test_file = os.path.join(self.input_path, abr_files[0])
+            test_file = parquet_files[0]
             logger.info(f"TEST MODE: Loading only {test_file}")
             abr_data = self.conn.execute(f"""
                 SELECT * FROM read_parquet('{test_file}')
             """).fetchdf()
         else:
-            # Load all ABR files
+            # Load all ABR files using the list of file paths
+            file_list_str = "', '".join(parquet_files)
             abr_data = self.conn.execute(f"""
-                SELECT * FROM read_parquet('{self.input_path}/*.parquet')
+                SELECT * FROM read_parquet(['{file_list_str}'])
             """).fetchdf()
         
         logger.info(f"Loaded {len(abr_data)} ABR records")
@@ -127,7 +175,7 @@ class ABRTransformer:
         df_clean['StartDate'] = pd.to_datetime(df_clean['StartDate'], format='%Y%m%d', errors='coerce')
         df_clean = df_clean.dropna(subset=['StartDate'])
         
-        # 8. Extract abr_company_name - lowercase, remove ltd/pty/all
+        # 8. Extract abr_company_name - lowercase, remove ltd/pty
         logger.info("Extracting abr_company_name...")
         df_clean['abr_company_name'] = df_clean['EntityName'].apply(self._extract_company_name)
         df_clean = df_clean.dropna(subset=['abr_company_name'])
@@ -247,11 +295,17 @@ class ABRTransformer:
         return state_mapping.get(state_code, state_code)
     
     def save_data(self, df: pd.DataFrame, test_mode: bool = False, processing_time: float = None):
-        """Save transformed data and summary."""
+        """Save transformed data and summary in daywise folders."""
         logger.info("Saving ABR transformed data...")
         
-        # Save main data using DuckDB
-        output_file = os.path.join(self.output_path, 'abr_transformed.parquet')
+        # Get daily output folder
+        daily_folder = self._get_daily_output_folder()
+        
+        # Create timestamp for unique file naming
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+        
+        # Save main data using DuckDB with timestamp
+        output_file = os.path.join(daily_folder, f'abr_transformed_{timestamp}.parquet')
         self.conn.register('df_temp', df)
         self.conn.execute(f"""
             COPY (SELECT * FROM df_temp) TO '{output_file}' (FORMAT PARQUET)
@@ -260,7 +314,7 @@ class ABRTransformer:
         
         # Save sample CSV for testing (always generate)
         sample_df = df.head(20)
-        csv_file = os.path.join(self.output_path, 'abr_sample_20_records.csv')
+        csv_file = os.path.join(daily_folder, f'abr_sample_20_records_{timestamp}.csv')
         sample_df.to_csv(csv_file, index=False)
         logger.info(f"ABR sample data (20 records) saved to {csv_file}")
         
@@ -280,7 +334,7 @@ class ABRTransformer:
             'timestamp': datetime.now().isoformat()
         }
         
-        summary_file = os.path.join(self.output_path, 'abr_summary.json')
+        summary_file = os.path.join(daily_folder, f'abr_summary_{timestamp}.json')
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2, default=str)
         logger.info(f"ABR summary saved to {summary_file}")

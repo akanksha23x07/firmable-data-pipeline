@@ -69,6 +69,13 @@ class EntityMatcher:
         
         logger.info("EntityMatcher initialized")
     
+    def _get_daily_output_folder(self) -> str:
+        """Get the current date folder path for organizing output by day"""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        daily_folder = os.path.join(self.output_path, current_date)
+        os.makedirs(daily_folder, exist_ok=True)
+        return daily_folder
+    
     def _find_parquet_file(self, file_path):
         """Find a parquet file, handling both file paths and directory paths."""
         import glob
@@ -78,17 +85,52 @@ class EntityMatcher:
             logger.info(f"Found parquet file: {file_path}")
             return file_path
         
-        # If it's a directory, look for parquet files
+        # If it's a directory, look for parquet files (prioritizing current day folder)
         if os.path.isdir(file_path):
+            # First, look for parquet files directly in the directory
             pattern = os.path.join(file_path, "*.parquet")
             matches = glob.glob(pattern)
             
             if matches:
                 logger.info(f"Found parquet file in directory: {matches[0]}")
                 return matches[0]
-            else:
-                logger.error(f"No parquet files found in directory: {file_path}")
-                raise FileNotFoundError(f"No parquet files found in {file_path}")
+            
+            # If no direct parquet files, look for daywise folders (YYYY-MM-DD format)
+            import re
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # First, look for current day folder
+            current_day_folder = os.path.join(file_path, current_date)
+            if os.path.isdir(current_day_folder):
+                daily_pattern = os.path.join(current_day_folder, "*.parquet")
+                daily_matches = glob.glob(daily_pattern)
+                if daily_matches:
+                    # Return the most recent file (by modification time)
+                    latest_file = max(daily_matches, key=os.path.getmtime)
+                    logger.info(f"Found parquet file in current day folder ({current_date}): {latest_file}")
+                    return latest_file
+            
+            # If no current day folder, look for any daily folders
+            daily_folders = []
+            for item in os.listdir(file_path):
+                item_path = os.path.join(file_path, item)
+                if os.path.isdir(item_path) and re.match(r'\d{4}-\d{2}-\d{2}', item):
+                    daily_folders.append(item)
+            
+            if daily_folders:
+                # Use the most recent daily folder
+                latest_folder = sorted(daily_folders)[-1]
+                latest_folder_path = os.path.join(file_path, latest_folder)
+                daily_pattern = os.path.join(latest_folder_path, "*.parquet")
+                daily_matches = glob.glob(daily_pattern)
+                if daily_matches:
+                    # Return the most recent file (by modification time)
+                    latest_file = max(daily_matches, key=os.path.getmtime)
+                    logger.info(f"No current day folder found. Using latest available folder ({latest_folder}): {latest_file}")
+                    return latest_file
+            
+            logger.error(f"No parquet files found in directory: {file_path}")
+            raise FileNotFoundError(f"No parquet files found in {file_path}")
         
         # If it's neither file nor directory, try to find similar files
         directory = os.path.dirname(file_path)
@@ -245,17 +287,20 @@ class EntityMatcher:
         
         return embeddings
     
-    def prepare_embeddings(self, cc_data: pd.DataFrame):
-        """Prepare embeddings for CommonCrawl company names."""
+    def prepare_embeddings(self, cc_data: pd.DataFrame, exact_matches: pd.DataFrame):
+        """Prepare embeddings for CommonCrawl company names that don't have exact matches."""
         logger.info("Preparing embeddings for CommonCrawl company names...")
         
-        # Get unique company names
-        unique_cc_names = cc_data['cc_company_name'].unique()
-        logger.info(f"Generating embeddings for {len(unique_cc_names)} unique CommonCrawl company names")
+        # Get CommonCrawl company names that don't have exact matches
+        exact_match_cc_names = set(exact_matches[exact_matches['match_type'] == 'exact']['cc_company_name'].dropna().unique())
+        all_cc_names = cc_data['cc_company_name'].unique()
+        unmatched_cc_names = [name for name in all_cc_names if name not in exact_match_cc_names]
+        
+        logger.info(f"Generating embeddings for {len(unmatched_cc_names)} unmatched CommonCrawl company names (out of {len(all_cc_names)} total)")
         
         # Generate embeddings using BGE-small
-        self.cc_embeddings = self.generate_embeddings(unique_cc_names.tolist())
-        self.cc_company_names = unique_cc_names
+        self.cc_embeddings = self.generate_embeddings(unmatched_cc_names)
+        self.cc_company_names = np.array(unmatched_cc_names)
         
         # Create FAISS index for efficient similarity search
         dimension = self.cc_embeddings.shape[1]
@@ -268,19 +313,22 @@ class EntityMatcher:
         logger.info(f"FAISS index created with {self.faiss_index.ntotal} vectors")
         logger.info(f"Embeddings generated with shape {self.cc_embeddings.shape}")
     
-    def semantic_matching(self, abr_data: pd.DataFrame, threshold: float = 0.9) -> Dict:
-        """Perform semantic matching using embeddings and FAISS."""
+    def semantic_matching(self, abr_data: pd.DataFrame, exact_matches: pd.DataFrame, threshold: float = 0.9) -> Dict:
+        """Perform semantic matching using embeddings and FAISS on non-exact matches only."""
         logger.info(f"Performing semantic matching with threshold {threshold}...")
         
         if self.faiss_index is None:
             raise ValueError("FAISS index not initialized. Call prepare_embeddings first.")
         
         # Get ABR company names that don't have exact matches
-        abr_names = abr_data['abr_company_name'].unique()
-        logger.info(f"Generating embeddings for {len(abr_names)} ABR company names")
+        exact_match_names = set(exact_matches[exact_matches['match_type'] == 'exact']['abr_company_name'].unique())
+        all_abr_names = abr_data['abr_company_name'].unique()
+        unmatched_abr_names = [name for name in all_abr_names if name not in exact_match_names]
+        
+        logger.info(f"Generating embeddings for {len(unmatched_abr_names)} unmatched ABR company names (out of {len(all_abr_names)} total)")
         
         # Generate embeddings for ABR company names using BGE-small
-        abr_embeddings = self.generate_embeddings(abr_names.tolist())
+        abr_embeddings = self.generate_embeddings(unmatched_abr_names)
         
         # Normalize ABR embeddings for FAISS search
         faiss.normalize_L2(abr_embeddings)
@@ -291,7 +339,7 @@ class EntityMatcher:
         
         # Create mapping for hybrid semantic + lexical matches
         semantic_matches = {}
-        for i, abr_name in enumerate(abr_names):
+        for i, abr_name in enumerate(unmatched_abr_names):
             best_hybrid_score = 0.0
             best_match = None
             
@@ -425,8 +473,14 @@ class EntityMatcher:
         return unified_data
     
     def save_results(self, unified_data: pd.DataFrame, exact_matches: pd.DataFrame, semantic_matches: Dict):
-        """Save matching results and reports."""
+        """Save matching results and reports in daywise folders."""
         logger.info("Saving entity matching results...")
+        
+        # Get daily output folder
+        daily_folder = self._get_daily_output_folder()
+        
+        # Create timestamp for unique file naming
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
         
         # Update match flags in the data before saving
         logger.info("Updating match flags for matched records...")
@@ -437,39 +491,84 @@ class EntityMatcher:
         # Prepare data for saving
         matched_data = unified_data[unified_data['match_type'] != 'no_match']
         
-        # Prepare ABR data with match flags
-        abr_updated = unified_data[['ABN', 'EntityName', 'EntityType', 'EntityStatus', 
-                                   'State', 'Postcode', 'StartDate', 'address', 'match_flag']].copy()
+        # Prepare ALL ABR data with updated match flags (both matched and unmatched)
+        logger.info("Preparing ALL ABR data with updated match flags...")
         
-        # Remove duplicates from ABR data (same ABN + EntityName combination)
-        abr_updated = abr_updated.drop_duplicates(subset=['ABN', 'EntityName'], keep='first')
+        # Load original ABR data (including existing match_flag column)
+        abr_original = self.conn.execute(f"""
+            SELECT ABN, EntityName, EntityType, EntityStatus, State, Postcode, StartDate, address, match_flag
+            FROM read_parquet('{self.abr_data_path}')
+        """).fetchdf()
         
-        # Prepare CommonCrawl data with match flags
-        cc_columns = ['base_url', 'domain', 'cc_company_name', 'match_flag']
-        if 'extracted_index' in unified_data.columns:
-            cc_columns.append('extracted_index')
+        # Reset all match flags to 0 (unmatched) first
+        abr_original['match_flag'] = 0
         
-        cc_updated = unified_data[cc_columns].copy()
-        cc_updated = cc_updated.dropna(subset=['domain', 'cc_company_name'])  # Remove rows without CC data
+        # Update match flags for matched records
+        matched_abr_records = unified_data[unified_data['match_type'] != 'no_match']
+        if len(matched_abr_records) > 0:
+            # Create a set of matched ABNs
+            matched_abns = set(matched_abr_records['ABN'].dropna().unique())
+            
+            # Update match flags for matched ABR records
+            for idx, row in abr_original.iterrows():
+                if row['ABN'] in matched_abns:
+                    abr_original.loc[idx, 'match_flag'] = 1
         
-        # Remove duplicates from CommonCrawl data (same domain/company can match multiple ABR records)
-        cc_updated = cc_updated.drop_duplicates(subset=['domain', 'cc_company_name'], keep='first')
+        abr_updated = abr_original.copy()
+        logger.info(f"Prepared {len(abr_updated)} ABR records: {abr_updated['match_flag'].sum()} matched, {len(abr_updated) - abr_updated['match_flag'].sum()} unmatched")
+        
+        # Prepare ALL CommonCrawl data with updated match flags (both matched and unmatched)
+        logger.info("Preparing ALL CommonCrawl data with updated match flags...")
+        
+        # Load original CommonCrawl data (including existing match_flag column)
+        cc_original = self.conn.execute(f"""
+            SELECT base_url, domain, cc_company_name, extracted_index, match_flag
+            FROM read_parquet('{self.commoncrawl_data_path}')
+        """).fetchdf()
+        
+        # Reset all match flags to 0 (unmatched) first
+        cc_original['match_flag'] = 0
+        
+        # Update match flags for matched records
+        matched_cc_records = unified_data[unified_data['match_type'] != 'no_match']
+        if len(matched_cc_records) > 0:
+            # Create a set of matched domain+company combinations
+            matched_combinations = set()
+            for _, row in matched_cc_records.iterrows():
+                if pd.notna(row['domain']) and pd.notna(row['cc_company_name']):
+                    matched_combinations.add((row['domain'], row['cc_company_name']))
+            
+            # Update match flags for matched records
+            for idx, row in cc_original.iterrows():
+                if (row['domain'], row['cc_company_name']) in matched_combinations:
+                    cc_original.loc[idx, 'match_flag'] = 1
+        
+        cc_updated = cc_original.copy()
+        logger.info(f"Prepared {len(cc_updated)} CommonCrawl records: {cc_updated['match_flag'].sum()} matched, {len(cc_updated) - cc_updated['match_flag'].sum()} unmatched")
         
         # Save sample CSV files (10 records each) before saving parquet files
         logger.info("Saving sample CSV files (10 records each)...")
         
-        # 1. Save ABR sample CSV
-        abr_sample = abr_updated.head(10)
-        abr_csv_file = os.path.join(self.output_path, 'abr_sample_10_records.csv')
-        abr_sample.to_csv(abr_csv_file, index=False)
-        logger.info(f"ABR sample (10 records) saved to {abr_csv_file}")
+        # 1. Save ABR sample CSV (mix of matched and unmatched)
+        # Get 5 matched and 5 unmatched records for better representation
+        matched_abr = abr_updated[abr_updated['match_flag'] == 1].head(5)
+        unmatched_abr = abr_updated[abr_updated['match_flag'] == 0].head(5)
+        abr_sample = pd.concat([matched_abr, unmatched_abr], ignore_index=True)
         
-        # 2. Save CommonCrawl sample CSV
+        abr_csv_file = os.path.join(daily_folder, f'abr_sample_10_records_{timestamp}.csv')
+        abr_sample.to_csv(abr_csv_file, index=False)
+        logger.info(f"ABR sample (10 records: {len(matched_abr)} matched, {len(unmatched_abr)} unmatched) saved to {abr_csv_file}")
+        
+        # 2. Save CommonCrawl sample CSV (mix of matched and unmatched)
         if len(cc_updated) > 0:
-            cc_sample = cc_updated.head(10)
-            cc_csv_file = os.path.join(self.output_path, 'commoncrawl_sample_10_records.csv')
+            # Get 5 matched and 5 unmatched records for better representation
+            matched_cc = cc_updated[cc_updated['match_flag'] == 1].head(5)
+            unmatched_cc = cc_updated[cc_updated['match_flag'] == 0].head(5)
+            cc_sample = pd.concat([matched_cc, unmatched_cc], ignore_index=True)
+            
+            cc_csv_file = os.path.join(daily_folder, f'commoncrawl_sample_10_records_{timestamp}.csv')
             cc_sample.to_csv(cc_csv_file, index=False)
-            logger.info(f"CommonCrawl sample (10 records) saved to {cc_csv_file}")
+            logger.info(f"CommonCrawl sample (10 records: {len(matched_cc)} matched, {len(unmatched_cc)} unmatched) saved to {cc_csv_file}")
         else:
             logger.warning("No CommonCrawl data available for sample CSV")
         
@@ -491,7 +590,7 @@ class EntityMatcher:
                 matched_sample = matched_sample.rename(columns={'matched_at': 'created_at'})
             
             matched_sample = matched_sample.head(10)
-            matched_csv_file = os.path.join(self.output_path, 'matched_companies_sample_10_records.csv')
+            matched_csv_file = os.path.join(daily_folder, f'matched_companies_sample_10_records_{timestamp}.csv')
             matched_sample.to_csv(matched_csv_file, index=False)
             logger.info(f"Matched companies sample (10 records) saved to {matched_csv_file}")
         else:
@@ -501,7 +600,7 @@ class EntityMatcher:
         logger.info("Saving parquet files...")
         
         # Save only matched records (exclude no-match records) as parquet
-        matched_file = os.path.join(self.output_path, 'matched_entity_matches.parquet')
+        matched_file = os.path.join(daily_folder, f'matched_entity_matches_{timestamp}.parquet')
         
         if len(matched_data) > 0:
             # Select only required columns for matched companies data
@@ -528,28 +627,28 @@ class EntityMatcher:
             logger.warning("No matched records found to save")
         
         # Save updated ABR data with match flags
-        abr_updated_file = os.path.join(self.output_path, 'abr_with_match_flags.parquet')
+        abr_updated_file = os.path.join(daily_folder, f'abr_with_match_flags_{timestamp}.parquet')
         self.conn.register('abr_updated_temp', abr_updated)
         self.conn.execute(f"""
             COPY (SELECT * FROM abr_updated_temp) TO '{abr_updated_file}' (FORMAT PARQUET)
         """)
-        logger.info(f"Updated ABR data with match flags saved to {abr_updated_file}")
+        logger.info(f"ALL ABR data with match flags saved to {abr_updated_file} ({len(abr_updated)} total records: {abr_updated['match_flag'].sum()} matched, {len(abr_updated) - abr_updated['match_flag'].sum()} unmatched)")
         
         # Save updated CommonCrawl data with match flags
         if len(cc_updated) > 0:
-            cc_updated_file = os.path.join(self.output_path, 'commoncrawl_with_match_flags.parquet')
+            cc_updated_file = os.path.join(daily_folder, f'commoncrawl_with_match_flags_{timestamp}.parquet')
             self.conn.register('cc_updated_temp', cc_updated)
             self.conn.execute(f"""
                 COPY (SELECT * FROM cc_updated_temp) TO '{cc_updated_file}' (FORMAT PARQUET)
             """)
-            logger.info(f"Updated CommonCrawl data with match flags saved to {cc_updated_file}")
+            logger.info(f"ALL CommonCrawl data with match flags saved to {cc_updated_file} ({len(cc_updated)} total records: {cc_updated['match_flag'].sum()} matched, {len(cc_updated) - cc_updated['match_flag'].sum()} unmatched)")
         else:
             logger.warning("No CommonCrawl data with match flags to save")
         
         # Save sample CSV for testing (only matched records)
         if len(matched_data) > 0:
             sample_df = matched_data.head(50)
-            csv_file = os.path.join(self.output_path, 'matched_entity_matches_sample_50_records.csv')
+            csv_file = os.path.join(daily_folder, f'matched_entity_matches_sample_50_records_{timestamp}.csv')
             sample_df.to_csv(csv_file, index=False)
             logger.info(f"Sample matched data (50 records) saved to {csv_file}")
         else:
@@ -570,7 +669,7 @@ class EntityMatcher:
             'timestamp': datetime.now().isoformat()
         }
         
-        summary_file = os.path.join(self.output_path, 'entity_matching_summary.json')
+        summary_file = os.path.join(daily_folder, f'entity_matching_summary_{timestamp}.json')
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2, default=str)
         logger.info(f"Matching summary saved to {summary_file}")
@@ -584,7 +683,7 @@ class EntityMatcher:
             'lexical_method': 'Jaccard similarity with character 3-grams'
         }
         
-        semantic_file = os.path.join(self.output_path, 'semantic_matches_details.json')
+        semantic_file = os.path.join(daily_folder, f'semantic_matches_details_{timestamp}.json')
         with open(semantic_file, 'w') as f:
             json.dump(semantic_details, f, indent=2, default=str)
         logger.info(f"Semantic matches details saved to {semantic_file}")
@@ -596,7 +695,7 @@ class EntityMatcher:
         # Get parameters from environment variables or use defaults
         import os
         threshold = threshold or float(os.getenv('ENTITY_MATCHING_THRESHOLD', '0.9'))
-        limit_records = limit_records or int(os.getenv('ENTITY_MATCHING_LIMIT_RECORDS', '10000'))
+        limit_records = limit_records or int(os.getenv('ENTITY_MATCHING_LIMIT_RECORDS', '100000'))
         logger.info(f"Using parameters: threshold={threshold}, limit_records={limit_records}")
         
         try:
@@ -606,11 +705,11 @@ class EntityMatcher:
             # 2. Perform exact matching
             exact_matches = self.exact_matching(abr_data, cc_data)
             
-            # 3. Prepare embeddings for semantic matching
-            self.prepare_embeddings(cc_data)
+            # 3. Prepare embeddings for semantic matching (only unmatched CommonCrawl names)
+            self.prepare_embeddings(cc_data, exact_matches)
             
-            # 4. Perform semantic matching
-            semantic_matches = self.semantic_matching(abr_data, threshold)
+            # 4. Perform semantic matching (only on non-exact matches)
+            semantic_matches = self.semantic_matching(abr_data, exact_matches, threshold)
             
             # 5. Create unified table
             unified_data = self.create_unified_table(exact_matches, semantic_matches)
@@ -654,7 +753,7 @@ def main():
     
     # Get parameters from environment variables or use defaults
     threshold = float(os.getenv('ENTITY_MATCHING_THRESHOLD', '0.9'))
-    limit_records = int(os.getenv('ENTITY_MATCHING_LIMIT_RECORDS', '10000'))
+    limit_records = int(os.getenv('ENTITY_MATCHING_LIMIT_RECORDS', '100000'))
     
     logger.info(f"Entity matching configuration:")
     logger.info(f"  - Threshold: {threshold} (90% = strict matching, 70% = loose matching)")

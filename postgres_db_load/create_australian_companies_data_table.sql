@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS australian_companies_data (
     
     -- Constraints
     CONSTRAINT chk_abn_format CHECK (abn ~ '^[0-9]{11}$'),
-    CONSTRAINT chk_match_score CHECK (match_score >= 0 AND match_score <= 1)
+    CONSTRAINT chk_match_score CHECK (match_score >= 0 AND match_score <= 1),
+    CONSTRAINT uk_acd_abn_cc_company UNIQUE (abn, cc_company_name)
 );
 
 -- Create indexes for better query performance

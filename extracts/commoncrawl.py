@@ -14,6 +14,7 @@ load_dotenv()
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from datetime import datetime
 
 
 class CommonCrawlExtractor:
@@ -50,6 +51,13 @@ class CommonCrawlExtractor:
         self.logger.info(f"Initialized CommonCrawlExtractor with crawl: {crawl}, base_url: {self.base_url}")
         self.logger.info(f"Dump directory: {self.dump_dir}, Batch size: {self.batch_size}")
 
+    def _get_daily_folder_path(self):
+        """Get the current date folder path for organizing data by day"""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        daily_folder = os.path.join(self.dump_dir, current_date)
+        os.makedirs(daily_folder, exist_ok=True)
+        return daily_folder
+
     def _setup_logging(self):
         """Setup logging configuration"""
         logging.basicConfig(
@@ -85,13 +93,21 @@ class CommonCrawlExtractor:
             raise
 
     def _write_parquet_batch(self, batch_df: pd.DataFrame, batch_num: int):
-        """Write batch to Parquet file"""
+        """Write batch to Parquet file with daywise organization and timestamp naming"""
         if batch_df.empty:
             self.logger.debug("Empty batch, skipping write")
             return
             
         try:
-            parquet_file = f"{self.dump_dir}/commoncrawl_batch_{batch_num:03d}.parquet"
+            # Get daily folder path
+            daily_folder = self._get_daily_folder_path()
+            
+            # Create timestamp for unique file naming
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+            
+            # Create parquet filename with timestamp
+            parquet_file = os.path.join(daily_folder, f"commoncrawl_{timestamp}.parquet")
+            
             self.logger.debug(f"Writing batch {batch_num} with {len(batch_df)} records to {parquet_file}")
             
             fastparquet.write(parquet_file, batch_df, compression='snappy')
@@ -290,7 +306,9 @@ class CommonCrawlExtractor:
                 "tld_filters_used": tld_filters
             }
             
-            progress_file = f"{self.dump_dir}/progress.json"
+            # Save progress in the daily folder
+            daily_folder = self._get_daily_folder_path()
+            progress_file = os.path.join(daily_folder, "progress.json")
             with open(progress_file, 'w') as f:
                 json.dump(progress, f, indent=2)
             
@@ -318,8 +336,8 @@ if __name__ == "__main__":
     # Run highly optimized extraction with parallel processing and multiple TLDs
     try:
         results = extractor.fetch_index_optimized(
-            target_records=200000,
-            max_shards=200,
+            target_records=400000,
+            max_shards=300,
             max_workers=20,
             tld_filters=['au', 'com.au', 'org.au', 'net.au']
         )
