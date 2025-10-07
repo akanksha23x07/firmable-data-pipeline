@@ -1,6 +1,6 @@
-# Firmable Data Pipeline - Docker Setup
+# Firmable Data Pipeline 
 
-This document provides instructions for running the Firmable data pipeline using Docker and Docker Compose.
+This document provides instructions for running the Firmable data pipeline using Docker and Docker Compose along with Entity Matching Explaination
 
 ## Overview
 
@@ -552,11 +552,11 @@ Controls dataset size for testing:
 
 | Limit | Processing Time | Memory Usage | Use Case |
 |-------|----------------|--------------|----------|
-| **100** | ~30 seconds | ~500MB | Quick testing |
-| **1,000** | ~2 minutes | ~1GB | Development |
-| **10,000** | ~10 minutes | ~2GB | Staging |
-| **100,000** | ~60 minutes | ~4GB | Production testing |
-| **0 (all)** | ~2 hours | ~6GB | Full production |
+| **100** | ~30 seconds | ~100MB | Quick testing |
+| **1,000** | ~2 minutes | ~500GB | Development |
+| **10,000** | ~5 minutes | ~1GB | Staging |
+| **100,000** | ~30 minutes | ~2GB | Production testing |
+| **0 (all)** | ~2 hours | ~4 - 6 GB | Full production |
 
 ### 🔍 **Match Quality Assessment**
 
