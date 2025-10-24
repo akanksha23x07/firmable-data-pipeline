@@ -491,60 +491,33 @@ class EntityMatcher:
         # Prepare data for saving
         matched_data = unified_data[unified_data['match_type'] != 'no_match']
         
-        # Prepare ALL ABR data with updated match flags (both matched and unmatched)
-        logger.info("Preparing ALL ABR data with updated match flags...")
+        # Prepare ABR data with updated match flags (only records that were processed in entity matching)
+        logger.info("Preparing ABR data with updated match flags (only processed records)...")
         
-        # Load original ABR data (including existing match_flag column)
-        abr_original = self.conn.execute(f"""
-            SELECT ABN, EntityName, EntityType, EntityStatus, State, Postcode, StartDate, address, match_flag
-            FROM read_parquet('{self.abr_data_path}')
-        """).fetchdf()
+        # Extract ABR data from unified_data (only records that were processed)
+        abr_updated = unified_data[['ABN', 'EntityName', 'EntityType', 'EntityStatus', 
+                                   'State', 'Postcode', 'StartDate', 'address', 'match_flag']].copy()
         
-        # Reset all match flags to 0 (unmatched) first
-        abr_original['match_flag'] = 0
+        # Remove duplicates from ABR data (same ABN + EntityName combination)
+        abr_updated = abr_updated.drop_duplicates(subset=['ABN', 'EntityName'], keep='first')
         
-        # Update match flags for matched records
-        matched_abr_records = unified_data[unified_data['match_type'] != 'no_match']
-        if len(matched_abr_records) > 0:
-            # Create a set of matched ABNs
-            matched_abns = set(matched_abr_records['ABN'].dropna().unique())
-            
-            # Update match flags for matched ABR records
-            for idx, row in abr_original.iterrows():
-                if row['ABN'] in matched_abns:
-                    abr_original.loc[idx, 'match_flag'] = 1
+        logger.info(f"Prepared {len(abr_updated)} ABR records (only processed records): {abr_updated['match_flag'].sum()} matched, {len(abr_updated) - abr_updated['match_flag'].sum()} unmatched")
         
-        abr_updated = abr_original.copy()
-        logger.info(f"Prepared {len(abr_updated)} ABR records: {abr_updated['match_flag'].sum()} matched, {len(abr_updated) - abr_updated['match_flag'].sum()} unmatched")
+        # Prepare CommonCrawl data with updated match flags (only records that were processed in entity matching)
+        logger.info("Preparing CommonCrawl data with updated match flags (only processed records)...")
         
-        # Prepare ALL CommonCrawl data with updated match flags (both matched and unmatched)
-        logger.info("Preparing ALL CommonCrawl data with updated match flags...")
+        # Extract CommonCrawl data from unified_data (only records that were processed)
+        cc_columns = ['base_url', 'domain', 'cc_company_name', 'match_flag']
+        if 'extracted_index' in unified_data.columns:
+            cc_columns.append('extracted_index')
         
-        # Load original CommonCrawl data (including existing match_flag column)
-        cc_original = self.conn.execute(f"""
-            SELECT base_url, domain, cc_company_name, extracted_index, match_flag
-            FROM read_parquet('{self.commoncrawl_data_path}')
-        """).fetchdf()
+        cc_updated = unified_data[cc_columns].copy()
+        cc_updated = cc_updated.dropna(subset=['domain', 'cc_company_name'])  # Remove rows without CC data
         
-        # Reset all match flags to 0 (unmatched) first
-        cc_original['match_flag'] = 0
+        # Remove duplicates from CommonCrawl data (same domain/company can match multiple ABR records)
+        cc_updated = cc_updated.drop_duplicates(subset=['domain', 'cc_company_name'], keep='first')
         
-        # Update match flags for matched records
-        matched_cc_records = unified_data[unified_data['match_type'] != 'no_match']
-        if len(matched_cc_records) > 0:
-            # Create a set of matched domain+company combinations
-            matched_combinations = set()
-            for _, row in matched_cc_records.iterrows():
-                if pd.notna(row['domain']) and pd.notna(row['cc_company_name']):
-                    matched_combinations.add((row['domain'], row['cc_company_name']))
-            
-            # Update match flags for matched records
-            for idx, row in cc_original.iterrows():
-                if (row['domain'], row['cc_company_name']) in matched_combinations:
-                    cc_original.loc[idx, 'match_flag'] = 1
-        
-        cc_updated = cc_original.copy()
-        logger.info(f"Prepared {len(cc_updated)} CommonCrawl records: {cc_updated['match_flag'].sum()} matched, {len(cc_updated) - cc_updated['match_flag'].sum()} unmatched")
+        logger.info(f"Prepared {len(cc_updated)} CommonCrawl records (only processed records): {cc_updated['match_flag'].sum()} matched, {len(cc_updated) - cc_updated['match_flag'].sum()} unmatched")
         
         # Save sample CSV files (10 records each) before saving parquet files
         logger.info("Saving sample CSV files (10 records each)...")
@@ -632,7 +605,7 @@ class EntityMatcher:
         self.conn.execute(f"""
             COPY (SELECT * FROM abr_updated_temp) TO '{abr_updated_file}' (FORMAT PARQUET)
         """)
-        logger.info(f"ALL ABR data with match flags saved to {abr_updated_file} ({len(abr_updated)} total records: {abr_updated['match_flag'].sum()} matched, {len(abr_updated) - abr_updated['match_flag'].sum()} unmatched)")
+        logger.info(f"ABR data with match flags saved to {abr_updated_file} ({len(abr_updated)} processed records: {abr_updated['match_flag'].sum()} matched, {len(abr_updated) - abr_updated['match_flag'].sum()} unmatched)")
         
         # Save updated CommonCrawl data with match flags
         if len(cc_updated) > 0:
@@ -641,7 +614,7 @@ class EntityMatcher:
             self.conn.execute(f"""
                 COPY (SELECT * FROM cc_updated_temp) TO '{cc_updated_file}' (FORMAT PARQUET)
             """)
-            logger.info(f"ALL CommonCrawl data with match flags saved to {cc_updated_file} ({len(cc_updated)} total records: {cc_updated['match_flag'].sum()} matched, {len(cc_updated) - cc_updated['match_flag'].sum()} unmatched)")
+            logger.info(f"CommonCrawl data with match flags saved to {cc_updated_file} ({len(cc_updated)} processed records: {cc_updated['match_flag'].sum()} matched, {len(cc_updated) - cc_updated['match_flag'].sum()} unmatched)")
         else:
             logger.warning("No CommonCrawl data with match flags to save")
         
@@ -753,7 +726,7 @@ def main():
     
     # Get parameters from environment variables or use defaults
     threshold = float(os.getenv('ENTITY_MATCHING_THRESHOLD', '0.9'))
-    limit_records = int(os.getenv('ENTITY_MATCHING_LIMIT_RECORDS', '100000'))
+    limit_records = int(os.getenv('ENTITY_MATCHING_LIMIT_RECORDS', '10000'))
     
     logger.info(f"Entity matching configuration:")
     logger.info(f"  - Threshold: {threshold} (90% = strict matching, 70% = loose matching)")
